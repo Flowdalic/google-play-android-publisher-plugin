@@ -1,6 +1,9 @@
 package org.jenkinsci.plugins.googleplayandroidpublisher;
 
+import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.ListMultimap;
 import com.google.jenkins.plugins.credentials.oauth.GoogleRobotCredentials;
+
 import hudson.EnvVars;
 import hudson.Extension;
 import hudson.FilePath;
@@ -16,6 +19,7 @@ import hudson.tasks.Publisher;
 import hudson.util.ComboBoxModel;
 import hudson.util.FormValidation;
 import net.sf.json.JSONObject;
+
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
@@ -214,100 +218,108 @@ public class ApkPublisher extends GooglePlayPublisher {
             return false;
         }
 
-        // Get the full remote path in the workspace for each filename
-        final List<FilePath> apkFiles = new ArrayList<FilePath>();
-        final Set<String> applicationIds = new HashSet<String>();
-        final Set<Integer> versionCodes = new TreeSet<Integer>();
+        final ListMultimap<String, Application> apkMultiMap = ArrayListMultimap.create();
         for (String path : relativePaths) {
+            // Get the full remote path in the workspace for each filename
             FilePath apk = ws.child(path);
-            applicationIds.add(getApplicationId(apk));
-            versionCodes.add(getVersionCode(apk));
-            apkFiles.add(apk);
+            String applicationId = getApplicationId(apk);
+            int versionCode = getVersionCode(apk);
+            apkMultiMap.put(applicationId, new Application(applicationId, apk, versionCode));
         }
 
-        // If there are multiple APKs, ensure that all have the same application ID
-        if (applicationIds.size() != 1) {
-            logger.println("Multiple APKs were found but they have inconsistent application IDs:");
-            for (String id : applicationIds) {
-                logger.print("- ");
-                logger.println(id);
-            }
-            return false;
-        }
+        for (String applicationId : apkMultiMap.keySet()) {
+            final List<Application> apks = apkMultiMap.get(applicationId);
 
-        final String applicationId = applicationIds.iterator().next();
-
-        // Find the expansion filename(s) which match the pattern after variable expansion
-        final Map<Integer, ExpansionFileSet> expansionFiles = new TreeMap<Integer, ExpansionFileSet>();
-        final String expansionPattern = getExpandedExpansionFilesPattern(env);
-        if (expansionPattern != null) {
-            List<String> expansionPaths = ws.act(new FindFilesTask(expansionPattern));
-
-            // Check that the expansion files found apply to the APKs to be uploaded
-            for (String path : expansionPaths) {
-                FilePath file = ws.child(path);
-
-                // Check that the filename is in the right format
-                Matcher matcher = OBB_FILE_REGEX.matcher(file.getName());
-                if (!matcher.matches()) {
-                    logger.println(String.format("Expansion file '%s' doesn't match the required naming scheme", path));
-                    return false;
-                }
-
-                // We can only associate expansion files with the application ID we're going to upload
-                final String appId = matcher.group(3);
-                if (!applicationId.equals(appId)) {
-                    logger.println(String.format("Expansion filename '%s' doesn't match the application ID to be " +
-                            "uploaded: %s", path, applicationId));
-                    return false;
-                }
-
-                // We can only associate expansion files with version codes we're going to upload
-                final int versionCode = Integer.parseInt(matcher.group(2));
-                if (!versionCodes.contains(versionCode)) {
-                    logger.println(String.format("Expansion filename '%s' doesn't match the versionCode of any of " +
-                            "APK(s) to be uploaded: %s", path, join(versionCodes, ", ")));
-                    return false;
-                }
-
-                // File looks good, so add it to the fileset for this version code
-                final String type = matcher.group(1).toLowerCase(Locale.ENGLISH);
-                ExpansionFileSet fileSet = expansionFiles.get(versionCode);
-                if (fileSet == null) {
-                    fileSet = new ExpansionFileSet();
-                    expansionFiles.put(versionCode, fileSet);
-                }
-                if (type.equals(TYPE_MAIN)) {
-                    fileSet.setMainFile(file);
-                } else {
-                    fileSet.setPatchFile(file);
-                }
+            final List<FilePath> apkFiles = new ArrayList<FilePath>();
+            final Set<Integer> versionCodes = new TreeSet<Integer>();
+            for (Application app : apks) {
+                apkFiles.add(app.apkPath);
+                versionCodes.add(app.versionCode);
             }
 
-            // If there are patch files, make sure that each has a main file, or "use previous if missing" is enabled
-            for (ExpansionFileSet fileSet : expansionFiles.values()) {
-                if (!usePreviousExpansionFilesIfMissing && fileSet.getPatchFile() != null && fileSet.getMainFile() == null) {
-                    logger.println(String.format("Patch expansion file '%s' was provided, but no main expansion file " +
-                                    "was provided, and the option to reuse a pre-existing expansion file was " +
-                                    "disabled.\nGoogle Play requires that each APK with a patch file also has a main " +
-                                    "file.", fileSet.getPatchFile().getName()));
-                    return false;
+            // Find the expansion filename(s) which match the pattern after variable expansion
+            final Map<Integer, ExpansionFileSet> expansionFiles = new TreeMap<Integer, ExpansionFileSet>();
+            final String expansionPattern = getExpandedExpansionFilesPattern(env);
+            if (expansionPattern != null) {
+                List<String> expansionPaths = ws.act(new FindFilesTask(expansionPattern));
+
+                // Check that the expansion files found apply to the APKs to be uploaded
+                for (String path : expansionPaths) {
+                    FilePath file = ws.child(path);
+
+                    // Check that the filename is in the right format
+                    Matcher matcher = OBB_FILE_REGEX.matcher(file.getName());
+                    if (!matcher.matches()) {
+                        logger.println(String.format("Expansion file '%s' doesn't match the required naming scheme", path));
+                        return false;
+                    }
+
+                    // We can only associate expansion files with the application ID we're going to upload
+                    final String appId = matcher.group(3);
+                    if (!applicationId.equals(appId)) {
+                        continue;
+                    }
+
+                    // We can only associate expansion files with version codes we're going to upload
+                    final int versionCode = Integer.parseInt(matcher.group(2));
+                    if (!versionCodes.contains(versionCode)) {
+                        continue;
+                    }
+
+                    // File looks good, so add it to the fileset for this version code
+                    final String type = matcher.group(1).toLowerCase(Locale.ENGLISH);
+                    ExpansionFileSet fileSet = expansionFiles.get(versionCode);
+                    if (fileSet == null) {
+                        fileSet = new ExpansionFileSet();
+                        expansionFiles.put(versionCode, fileSet);
+                    }
+                    if (type.equals(TYPE_MAIN)) {
+                        fileSet.setMainFile(file);
+                    } else {
+                        fileSet.setPatchFile(file);
+                    }
+                }
+
+                // If there are patch files, make sure that each has a main file, or "use previous if missing" is enabled
+                for (ExpansionFileSet fileSet : expansionFiles.values()) {
+                    if (!usePreviousExpansionFilesIfMissing && fileSet.getPatchFile() != null && fileSet.getMainFile() == null) {
+                        logger.println(String.format("Patch expansion file '%s' was provided, but no main expansion file "
+                                + "was provided, and the option to reuse a pre-existing expansion file was "
+                                + "disabled.\nGoogle Play requires that each APK with a patch file also has a main " + "file.", fileSet
+                                .getPatchFile().getName()));
+                        return false;
+                    }
                 }
             }
-        }
 
-        // Upload the file(s) from the workspace
-        try {
-            GoogleRobotCredentials credentials = getServiceAccountCredentials();
-            return build.getWorkspace()
-                    .act(new ApkUploadTask(listener, credentials, applicationId, apkFiles, expansionFiles,
-                            usePreviousExpansionFilesIfMissing, fromConfigValue(getCanonicalTrackName(env)),
-                            getRolloutPercentageValue(env), getExpandedRecentChangesList(env)));
-        } catch (UploadException e) {
-            logger.println(String.format("Upload failed: %s", getPublisherErrorMessage(e)));
-            logger.println("- No changes have been applied to the Google Play account");
+            // Upload the file(s) from the workspace
+            try {
+                GoogleRobotCredentials credentials = getServiceAccountCredentials();
+                boolean res = build.getWorkspace().act(
+                        new ApkUploadTask(listener, credentials, applicationId, apkFiles, expansionFiles,
+                                usePreviousExpansionFilesIfMissing, fromConfigValue(getCanonicalTrackName(env)),
+                                getRolloutPercentageValue(env), getExpandedRecentChangesList(env)));
+                if (!res) {
+                    return false;
+                }
+            } catch (UploadException e) {
+                logger.println(String.format("Upload failed: %s", getPublisherErrorMessage(e)));
+                logger.println("- No changes have been applied to the Google Play account");
+            }
         }
-        return false;
+        return true;
+    }
+
+    private static class Application {
+        public final String applicationId;
+        public final FilePath apkPath;
+        public final int versionCode;
+
+        private Application(String applicationId, FilePath apkPath, int versionCode) {
+            this.applicationId = applicationId;
+            this.apkPath = apkPath;
+            this.versionCode = versionCode;
+        }
     }
 
     static final class ExpansionFileSet implements Serializable {
